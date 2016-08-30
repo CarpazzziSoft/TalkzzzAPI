@@ -1,80 +1,815 @@
 FORMAT: 1A
-HOST: http://polls.apiblueprint.org/
+HOST: http://staging.talkzzz.com/api/v1
 
-# Talkzzz-New
+# Talkzzz
 
-Polls is a simple API allowing consumers to view polls and vote in them.
+### Request
+JSON для работы через WebSocket формируется в соответствии со следующим форматом:
+```
+{
+    "type": "some type",
+    "data": { ... }
+}
+```
++ `type` Тип запроса
++ `data` Формат зависит от типа запроса 
 
-## Questions Collection [/questions]
+Через HTTPS формат запроса зависит от типа запроса (см. список методов ниже)
 
-### List All Questions [GET]
+### Response     
+JSON формируется в соответствии со следующим форматом:
+
+```
+{
+    "type": "success|error|event",
+    "data": { ... }
+}
+```
++ `type` Возможные значения `success`, `error` и `event`
+    + `success` - Успешный ответ (используется для https)
+    + `error` - Неуспешный ответ (используется для https и wss) ` { "code" : number, "description" : string } `
+    + `event` - Передача события (используется для wss) `{ "event_id" : string, "event_name" : string, ... }`, где `...` - произвольный формат, зависящий от события
++ `data` Формат зависит от типа запроса 
+
+### Authorization
+Для авторизации клиента в заголовках необходимо передать:
++ `Authorization` - ключ авторизации (см. [метод Аутентификация](#auth), передается в поле token)
+
+Методы, не требующие авторизации, помечаются знаком {-}
+
+### Pin code
+Процесс генерации AES ключа для шифрования локальных данных состоит из двух частей: генерации 16 байт на клиенте и запрос оставшейся части от сервера. 
+Существует два запроса для получения второй части ключа: аутенфтификация и запрос ключа. Сервер не хранит верный ключ, а просто, на основе входных данных, генерирует 16 байт.
+Сама правильность ключа проверяется на клиенте, при попытке расшифровать данные, которые ранее были зашифрованы. Для генирации ключа, клиент отправляет серверу два хэша: хэш от PEM публичного ключа, 
+позволяющий произвести идентификацию и хэш от клиентской части AES ключа. На основе второго хэша генерируется 16 байт, в процессе генерации участвуют данные, уникальные для каждого пользователя. До того момента, как клиент не сможет собрать весь AES ключ, никакие данные локально не сохраняются.
+
+#### Генерация ключа во время авторизации
+Генерация ключа производится во время авторизации(можно производить когда угодно, но к моменту генерации ключа уже должен быть сгенерирован публичный RSA ключ)
+- Пользователя просят утсановить пин-код
+- Клиент генерирует рандомные 16 байт, вычисляет от них MD5
+- Клиент генерирует пару RSA ключей, экспортирует публичный ключ в PEM
+- В запросе авторизации отправляются *хэш от 16 байт*, *PEM публичного ключа* и другие данные, необходимые для авторизации
+- Если авториация прошла успешно - среди прочих данных сервер вернёт вторую часть AES ключа(16 байт закодированные в base64)
+- Клиент декодид вторую чать AES ключа, производит конкатинацию со своей и получает тот AES ключ, которым будут зашифрованы почти все локальные ресурсы
+- Клиент шифрует свою часть AES ключа пин-кодом пользователя и сохраняет
+- Клиент шифрует публичный и приватный ключ полученным ранее AES ключом и сохраняет
+- Клиент сохраняет в незашифрованном виде MD5 от PEM публичного ключа
+
+
+#### Генерация ключа во время ввода пин-кода
+- Пользователь вводит пин-код, который устанавливал ранее
+- Загружется и расшифровывается(при помощи пин-кода) клиентская часть AES ключа, от этого вычисляется MD5. На данном этапе мы не можем понять, что пин был неверным, т.к. мы просто получаем 16 каких-то байт
+- Загружается MD5 от PEM публичного ключа
+- Отправляем два хэша на сервер в запросе получения AES ключа
+
+- Сервер проверяет, существет ли такой хэш от PEM
+- Сервер проверяет, остались ли попытки у пользователя
+- Сервер генерирует 16 байт на основе хэша от клиентской части AES ключа и некоторых данных пользователя, которые хранятся на сервере
+
+- На клиент возвращаются 16 байт, закодированные в base64, максимальное количество попыток и текущее количество попыток ввода пин-кода для этого клиента
+- Клиент собирает AES ключ и пытается расшифровать локальные данные(RSA ключи), если удаётся - пользователь правильно ввёл пин код
+
+
+Если во всей цепочке произошла какая-либо ошибка(не удалось найти такого пользователя, у пользователя коничились попытки) - сервер вернёт максимальное количество попыток и "текущее количество попыток", равное максимальному.
+Если неправильным был хэш от клиентской части ключа(кто-то пытается подобрать/неправильно был введён пин) - вернётся неправильная вторая часть ключа, что можно будет проверить, попытавшись расшифровать локальные данные.
+
+
+
+### Encryption
+Шифрование реализовано посредством двух криптографических алгоритмов - AES-256 и 
+RSA-2048.
+
++ *AES-256* используется для шифрования данных, хранящихся на стороне клиента.
+Алгоритм является симметричным - для операций шифрования и дешифрования используется
+один и тот же ключ. В качестве ключа используется SHA-256 контрольная сумма пароля, 
+заданного пользователем.
+
++ *RSA-2048* используется для шифрования данных, передаваемых между сервером
+и клиентом, и данных, хранящихся на сервере. В данный момент RSA-шифрование 
+применяется к содержимому сообщений и к ключу авторизации пользователя. Алгоритм
+является асимметричным - для операций шифрования и дешфрования используются
+различные ключи, принадлежащие одной паре. Для криптографических операций 
+используется пара PEM-encoded RSA-2048 ключей. Данные, зашифрованные
+с помощью RSA, передаются между клиентом и сервером в закодированном виде - с помощью
+Base64.
+
+### RSA Encryption Cases
+    
++ *Outgoing messages encryption.* Все сообщения передаются серверу в зашифрованном
+виде. В процессе отправки сообщения по сценарию устройство имеет список ID
+устройств-получателей и соответствующих им публичных ключей. Отправляемое
+сообщение должно быть отправлено серверу в виде хеш-таблицы, где каждому ID 
+устройства соответствует текст сообщения, зашифрованный публичным ключом,
+соответствующим этому устройству, и закодированный с помощью Base64.
+
+
+### Errors
++ `1` | Invalid Data | Ошибка валидации, либо в целом ошибка в запросе
++ `2` | Internal Server Error | Серверная ошибка
++ `3` | Unauthorized | Ошибка авторизации
++ `4` | Not Found | Точка доступа к АПИ неверна
+
+(Ошибки будут дополняться)
+
+Формат ошибки:
+```
+{
+    "type": "error",
+    "data": {
+        "code": 1,
+        "description": "Invalid Data",
+        "errors" : {
+            "device_id": ["some error #1", "some error #2"]
+        }
+    }
+}
+```
++ `type` Тип ответа `error`
++ `data`
+    + `code` Код ошибки (коды перечислены выше)
+    + `description` Описание ошибки
+    + `errors` Опционально
+        + `<field_name>` Массив ошибок по указанному полю
+
+
+# Group HTTPS
+
+
+
+## Common [/]
+
+### {-} Получение актуальной версии [GET/version{?platform}]
+<a name="auth"></a>
++ Parameters
+    + platform (enum[string]) - Целевая платформа
+
+        + Members
+            + `ios`
+            + `android`
+            + `osx`
+            + `windows`
 
 + Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (ClientVersionJSONResponse)
 
-        [
-            {
-                "question": "Favourite programming language?",
-                "published_at": "2015-08-05T08:40:51.620Z",
-                "choices": [
-                    {
-                        "choice": "Swift",
-                        "votes": 2048
-                    }, {
-                        "choice": "Python",
-                        "votes": 1024
-                    }, {
-                        "choice": "Objective-C",
-                        "votes": 512
-                    }, {
-                        "choice": "Ruby",
-                        "votes": 256
-                    }
-                ]
-            }
-        ]
 
-### Create a New Question [POST]
+### {-} Аутентификация [POST/authenticate]
++ Request (application/json)
+    + Attributes (object)
+        + login (string) - Логин пользователя
+        + password (string) - Пароль пользователя
+        + key (string) - PEM публичного RSA ключа. Все переносы строк нужно заменить на \n. В конце ключа также обязателен \n
+        + platform - Платформа устройства 
+        + device_name - Имя устройства
+        + hash - Хеш от клиентсткой части АЕС ключа
 
-You may create your own question using this action. It takes a JSON
-object containing a question and a collection of answers in the
-form of choices.
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (AuthJSONResponse)
+        
+
+
+### {-} Получение серверной части AES ключа для шифрования БД на клиентах [POST/pin]
++ Request (application/json)
+    + Attributes (object)
+        + public_hash: 5f6afa6473f439376c73fe388f92fd1a (string) - MD5 Хеш публичного ключа
+        + hash: asdfdsf56asd34FasdD (string) - MD5 Хеш от клиентской части AES ключа
+
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (PinJSONResponse)
+        
+        
+
++ Response 200
+
+## Files [/files]
+
+
+### Передача файла/файлов [POST/files/send_file]
++ Request (application/json)
+    + Attributes (SendFileRequest)
+    
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (SendFileResponse)
+     
+### Скачать файл [GET/files/{id}/download]
++ Parameters
+    + id (string) - ID файла, приходит в теле евента `file.received`
+    
++ Response 200 (application/json)
+
+
+## Devices [/devices]
+
+### Список устройств [GET/devices]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (array[DeviceFullJSON])
+        
+### {-} Состояние устройства [GET/devices/{id}]
++ Parameters
+    + id (string) - ID устройства
+
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (DeviceStateJSON)
+
+    
+### Изменить устройство [PUT/devices/{id}]
++ Request (application/json)
+    + Attributes (object)
+        + name: `my phone` (string) - Название устройства
+        + push_token: `ios or andoid push token` (string) - Пуш токен
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        
+### Заблокировать текущее устройство [GET/devices/block]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+ 
+
+## Users [/users]
+
+### Изменить [PUT/users/update]
++ Request (application/json)
+    + Attributes (object)
+        + nickname: `vovchik` (string) - Никнейм
+        + login: `atanych` (string) - Логин
+        + password: `asdasd` (string) - Пароль
+        + password_confirmation: `asdasd` (string) - Подтверждение пароля
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        
+## Contacts [/contacts]
+
+
+### Список контактов [GET/contacts]
+
+Возвращает список контактов
+
+    
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (array[ContactJSON]) - Информация о пользователе
+        
+### Информация о пользователе [GET/contacts/{id}]
+
+Получение информации о пользователе по ID
+
++ Parameters
+    + id (number) - ID пользователя
+    
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (ContactJSON) - Информация о пользователе
+     
+
+### Список устройств [POST/contacts/keys]
++ Request (application/json)
+    + Attributes (object)
+        + ids: 1,2 (array[number]) - Массив ID пользователей. по которым запрашивается информация по ключам
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (array[KeysListJSON])
+        
+### Список онлайн - *избыточен [GET/contacts/online]
+
+Возвращает спискок контактов, которые в данный момент имеют статус "онлайн".
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (array[number]) - Список ID пользователей, имеющих статус "онлайн"
+
+## Conversations [/conversations]
+     
+### Список диалогов [GET/conversations]
+
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (array[ConversationJSON]) - Информация о диалогах
+
+
+### Список ключей *deprecated [GET/conversations/{id}/keys]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (array[KeysListJSON])
+     
+
+### Создание диалога [POST/conversations]
 
 + Request (application/json)
+    + Attributes (object)
+        + title: Title (string) - Название беседы
+        + contacts (array[number]) - Массив ID контактов пользователя (будущих участников беседы)
+        
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (ConversationJSON) - Информация о созданном диалоге
 
-        {
-            "question": "Favourite programming language?",
-            "choices": [
-                "Swift",
-                "Python",
-                "Objective-C",
-                "Ruby"
-            ]
-        }
+### Удаление себя из диалога *deprecated [GET/conversations/{id}/leave]
 
-+ Response 201 (application/json)
+Выход из конференции, в которой состоит текущий пользователь.
 
-    + Headers
++ Parameters
+    + id (number) - ID конференции
+        
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
 
-            Location: /questions/2
+### Добавление контакта в диалог [POST/conversations/{id}/participants]
 
-    + Body
+Добавление контакта пользователя в конференцию, в которой состоит текущий пользователь.
 
-            {
-                "question": "Favourite programming language?",
-                "published_at": "2015-08-05T08:40:51.620Z",
-                "choices": [
-                    {
-                        "choice": "Swift",
-                        "votes": 0
-                    }, {
-                        "choice": "Python",
-                        "votes": 0
-                    }, {
-                        "choice": "Objective-C",
-                        "votes": 0
-                    }, {
-                        "choice": "Ruby",
-                        "votes": 0
-                    }
-                ]
-            }
++ Parameters
+    + id (number) - ID конференции
+    
++ Request (application/json)
+    + Attributes (object)
+        + contact_id (number) - ID контакта пользователя (будущего участника беседы)
+        
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+
+
+### Удаление контакта из диалога [DELETE/conversations/{conv_id}/participants/{part_id}]
+
++ Parameters
+    + conv_id (number) - ID конференции
+    + part_id (number) - ID удаляемого собеседника
+    
+        
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        
+### Список участников беседы [GET/conversations/{id}/participants]
+
+Получение списка участников беседы.
+
++ Parameters
+    + id (number) - ID конференции
+        
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (array[ContactJSON]) - Список участников беседы
+
+
+# Group WebSockets
+
+Поднять соединение через WebSocket - ws:{hostname}/v1/stream
+
+## Methods [/stream/request]
+
+### Отправка сообщения [HEAD/messages.send]
++ Request (application/json)
+    + Attributes (JSONRequest)
+        + type: `messages.send`
+        + data (JSONRequestData)
+            + text - Зашифрованное AES сообщение
+            + conversation_id (number) - ID беседы
+            + keys (array[FileKeysRequest]) - Массив ключей АЕС, зашифрованных RSA (по каждому устройству)
+            
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONCommonResponse
+        + data (MessageReceivedShortResponse)
+
+### Пометка сообщения прочитанным [HEAD/messages.read]
++ Request (application/json)
+    + Attributes (JSONRequest)
+        + type: `messages.read`
+        + data (JSONRequestData)
+            + message_id (number) - ID сообщения
+            
++ Response 200 (application/json)
+    + Attributes (JSONStreamResponse)
+
+### Запрос об активации устройства [HEAD/devices.request_activation]
++ Request (application/json)
+    + Attributes (JSONRequest)
+        + type: `devices.request_activation`
+            
++ Response 200 (application/json)
+    + Attributes (JSONStreamResponse)
+
+### Активация устройства [HEAD/devices.activate]
++ Request (application/json)
+    + Attributes (JSONRequest)
+        + type: `devices.activate`
+        + data (JSONRequestData)
+            + extra_device_id (number) - ID активируемого устройства текущего пользователя
+            
++ Response 200 (application/json)
+    + Attributes (JSONStreamResponse)
+
+### Деактивация устройства [HEAD/devices.deactivate]
++ Request (application/json)
+    + Attributes (JSONRequest)
+        + type: `devices.deactivate`
+        + data (JSONRequestData)
+            + extra_device_id (number) - ID деактивируемого устройства текущего пользователя
+            
++ Response 200 (application/json)
+    + Attributes (JSONStreamResponse)
+
+### Подтверждение о получении события [HEAD/common.confirm]
++ Request (application/json)
+    + Attributes (JSONRequest)
+        + type: `common.confirm`
+        + data (JSONRequestData)
+            + event_id (number) - ID события, может передаваться в виде массива
++ Response 200 (application/json)
+        
+     
+## Events [/stream/response]
+
+### Добавлено устройство [HEAD/a]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (DeviceAddedEvent)
+### Удалено устройство [HEAD/b]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (DeviceRemovedEvent)
+### Устройство активировано [HEAD/c]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (DeviceActiveEvent)
+### Запрос на активацию [HEAD/d]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (DeviceActivationRequestedEvent)
+
+
+### Получено сообщение [HEAD/e]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (MessageReceivedEvent)
+       
+
+### Получен файл/файлы [HEAD/ee]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (FileReceivedEvent) 
+        
+### Изменен статус сообщения [HEAD/f]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (MessageStateChangedEvent)
+
+        
+### Добавлена беседа [HEAD/gg]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (ConversationAddedEvent)
+        
+### Удалена беседа [HEAD/g]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (ConversationRemovedEvent)
+        
+        
+### Добавлен контакт [HEAD/k]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (ContactAddedEvent)
+       
+        
+### Изменен контакт [HEAD/kk]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (ContactUpdatedEvent)
+  
+     
+### Изменен логин у пользователя [HEAD/kgk]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (ContactLoginEvent)
+        
+             
+### Логаут пользователя  [HEAD/logout]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (UserLogoutEvent)
+        
+### Удален контакт [HEAD/kkk]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (ContactRemovedEvent)
+        
+### Изменен статус контакта [HEAD/l]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (ContactStatusChangedEvent)
+     
+### Изменен статус участника беседы [HEAD/m]
++ Response 200 (application/json)
+    + Attributes (object)
+        + Include JSONEvent
+        + data (ParticipantStatusChangedEvent)
+
+        
+## Aggregator [/stream/aggregator]
+
+### Возращает массив эвентов *см выше [HEAD/mz]
++ Response 200 (application/json)
+    + Attributes (EventAggregator)
+
+# Data Structures
+
+## JSONResponse (object) 
++ type: `success` (enum[string]) - Тип ответа
+   + success (string) - Удачный ответ на запрос
+   + error (string) - Ответ ошибкой на запрос
+   + event (string) - Событие, отправленное сервером
++ data (object)
+
+
+## JSONCommonResponse (object) 
++ type: success (string) - Удачный ответ на запрос
++ data (object)
+
+
+## ClientVersionJSONResponse (object)
++ version: 2.0 (string) - Актуальная версия
+
+
+## DeviceJSON
++ id: 1 (number) - Уникальный идентификатор устройства
++ name: `haritowa's iPhone` (string) - Название устройства
++ platform: `ios` (string) - Платформа устройства
++ state: 0 (enum[number]) - Статус активации устройства
+    + 0 (number) - Устройство ожидает активации
+    + 1 (number) - Устройство активированно
+    + `-1` (number) - Устройство заблокированно
+
+## DeviceFullJSON
++ id: 1 (number) - Уникальный идентификатор устройства
++ name: `haritowa's iPhone` (string) - Название устройства
++ platform: `ios` (string) - Платформа устройства
++ public_key: `some key` (string) - Публичный ключ устройства
++ state: 0 (enum[number]) - Статус активации устройства
+    + 0 (number) - Устройство ожидает активации
+    + 1 (number) - Устройство активированно
+    + `-1` (number) - Устройство заблокированно
+
+
+## UserLimitedJSON
++ id: 1 (number) - ID пользователя
++ nickname: `haritowa` (string) - Никнейм пользователя
+
+
+
+## DeviceStateJSON
++ state: 0 (enum[number]) - Статус активации устройства
+    + 0 (number) - Устройство ожидает активации
+    + 1 (number) - Устройство активированно
+    + `-1` (number) - Устройство заблокированно
+    
+## KeysListJSON
++ device_id: 1 (number) - ID устройства
++ user_id: 4 (number) - ID пользователя
++ key: `some key` (string) - Публичный ключ устройста
++ device_name: `haritosha phone` (string) - Название устройства
++ platform: `ios` (string) - Платформа устройства
++ state: 0 (enum[number]) - Состояние устройства
+    + 0 (number) - Устройство ожидает активации
+    + 1 (number) - Устройство активированно
+    + `-1` (number) - Устройство заблокированно
+
+
+## ContactJSON (object)
++ id: 1 (number) - ID контакта
++ nickname: heartbleed (string) - Псевдоним контакта
++ online: true (enum[boolean]) - Статус контакта
+    + true (boolean) - Контакт онлайн
+    + false (boolean) - Контакт оффлайн
++ type: 0 (enum[number]) - Тип контакта
+    + 0 (number) - Полный доступ
+    + 1 (number) - Ограниченный доступ (из групповой беседы)
+    
+## ConversationJSON (object)
++ id: 1 (number) - ID диалога
++ title: heartbleed (string) - Псевдоним: имя конференции для публичных и псевдоним пользователя для приватных конференций
++ type: type_private (enum[number]) - Тип конференции
+    + 0 (number) - Приватный диалог
+    + 1 (number) - Публичный диалог
++ contacts: 1,2 (array[number]) - Массив контактов
+
+## OutgoingMessageJSON (object)
++ device_id (number) - ID устройства
++ text (string) - Текст в зашифрованном виде
+
+## AuthJSONResponse
++ token: 1234 (string) - Токен
++ hash: `O0ttjlD1HQV97gIRefirwg==\n` (string) - Серверная часть ключа для шифрования AES
++ device (DeviceFullJSON) - Информация об устройстве
++ user (UserLimitedJSON) - Информация об пользователе
+
+
+## PinJSONResponse
++ hash: "7aeuWWqCaL4OGSQS7vkLvg==\n" (string) - Серверная часть AES ключа
++ max_attempts: 10 (number) - Максимальное количество попыток для получения хеша
++ current_attempts: 5 (number) - Текущее количество попыток
+
+## SendFileResponse
++ id: 348 (number) - ID сообщения
++ type: 0 (number) - Тип сообщения
++ date_sent: `2016-05-11T16:26:35.979Z` (string) - Время отправки сообщения
++ files: 197,198 (array[number]) - Массив переданных файлов
+
+## JSONEvent (object)
++ type: event (string) - Событие, отправленное сервером
++ data (JSONEventData)
+
+
+## JSONEventData (object)
++ `event_name` (string)
++ `event_id`: `event_id` (number) - Уникальный идентификатор события
+
+
+## DeviceActiveEvent (JSONEventData)
++ `event_name`: `device.activated`
++ `device_id`: 56 (number) - Уникальный идентификатор устройства
+
+## DeviceAddedEvent (JSONEventData)
++ `event_name`: `device.added`
++ `user_id`: 12 (number) - ID пользователя, зарегистрировшего новое устройство
++ `device_id`: 56 (number) - Уникальный идентификатор устройства
++ `key`: `key` (string) - Публичный ключ устройства
++ `platform`: `ios` (string) - Платформа устройства
++ `device_name`: `haritosha phone` (string) - Имя устройства
++ `state`: 1 (number) - Состояние устройства
+
+## DeviceRemovedEvent (JSONEventData)
++ `event_name`: `device.removed`
++ `user_id`: 12 (number) - ID пользователя, удалившего устройство
++ `device_id`: 56 (number) - Уникальный идентификатор устройства
+
+## DeviceActivationRequestedEvent (JSONEventData)
++ `event_name`: `device.activation_requested`
++ `device_id`: 56 (number) - Уникальный идентификатор устройства
+
+
+## MessageReceivedShortResponse (object)
+
++ `request_id`: 56 (number) - ID request
++ `id`: 56 (number) - Уникальный идентификатор сохраненного сообщения на сервере
++ `type`: 1 (enum[number]) - Тип сообщения
+    + 0 (number) - исходящее
+    + 1 (number) - входящее
++ `date_sent`: 56 (string) - Дата отправки сообщения
+
+## MessageReceivedEvent (JSONEventData)
++ `event_name`: `message.received`
++ `id`: 56 (number) - Уникальный идентификатор сохраненного сообщения на сервере
++ `type`: 1 (enum[number]) - Тип сообщения
+    + 0 (number) - исходящее
+    + 1 (number) - входящее
++ `conversation_id`: 56 (number) - Уникальный идентификатор беседы
++ `sender_id`: 56 (number) - ID пользователя-отправлителя
++ `date_sent`: 56 (string) - Дата отправки сообщения
++ `text`: 56 (string) - Текст сообщения, зашифрованный AES
++ `key`: aes_encrypted (string) - Ключ AES, зашифрованный RSA (public)
+
+## FileReceivedEvent (JSONEventData)
++ `event_name`: `file.received`
++ `id`: 56 (number) - ID сообщения
++ `type`: 1 (enum[number]) - Тип сообщения
+    + 0 (number) - исходящее
+    + 1 (number) - входящее
++ `conversation_id`: 56 (number) -ID беседы
++ `sender_id`: 56 (number) - ID отправителя
++ `date_sent`: 56 (string) - Дата отправки сообщения
++ `files`: 56 (array[string]) - ID полученных файлов
++ `key`: aes_encrypted (string) - Ключ AES, зашифрованный RSA (public)
++ `text`: text_encrypted (string) - Текст к документу, зашифрованный AES
+
+## MessageStateChangedEvent (JSONEventData)
++ `event_name`: `message.state_changed`
++ `message_id`: 56 (number) - Уникальный идентификатор сообщения на сервере
++ `state`: 1 (enum[number]) - Новый статус сообщения
+    + 0 (number)
+    + 1 (number)
+
+## ConversationAddedEvent (JSONEventData)
++ `event_name`: `conversation.added`
++ `id`: 56 (number) - Уникальный идентификатор беседы
++ `title`: heartbleed (string) - Псевдоним: имя конференции для публичных и псевдоним пользователя для приватных конференций
++ `contacts` : 1,2 (array[number]) - ID контактов, учавствующих в беседе
++ `type`: 0 (enum[number]) - Тип конференции
+    + 0 (number) - Приватный диалог
+    + 1 (number) - Публичный диалог
+
+## ConversationRemovedEvent (JSONEventData)
++ `event_name`: `conversation.removed`
++ `id`: 56 (number) - Уникальный идентификатор беседы
+
+## ContactAddedEvent (JSONEventData)
++ `event_name`: `contact.added`
++ id: 1 (number) - ID контакта
++ nickname: heartbleed (string) - Псевдоним контакта
++ `type`: 0 (enum[number]) - Тип контакта
+    + 0 (number) - Полный доступ
+    + 1 (number) - Ограниченный доступ (из групповой беседы)
+
+
+## ContactRemovedEvent (JSONEventData)
++ `event_name`: `contact.removed`
++ id: 1 (number) - ID контакта
+
+
+## ContactLoginEvent (JSONEventData)
++ `event_name`: `user.login_changed`
++ login: `vovchik` (string) - Логин
+
+
+## UserLogoutEvent (JSONEventData)
++ `event_name`: `user.logout`
++ version: `1.1.1` (string) - Новая версия платформы
+
+## ContactUpdatedEvent (JSONEventData)
++ `event_name`: `contact.updated`
++ id: 1 (number) - ID контакта
++ `type`: 0 (enum[number]) - Тип контакта
+    + 0 (number) - Полный доступ
+    + 1 (number) - Ограниченный доступ (из групповой беседы)
++ `nickname`: `vovchik` (string) Никнейм
+
+## ContactStatusChangedEvent (JSONEventData)
++ `event_name`: `contact.status_changed`
++ `id`: 56 (number) - Уникальный идентификатор пользователя
++ `online`: true (enum[boolean]) - Статус
+    + true (boolean) - Онлайн
+    + false (boolean) - Оффлайн
+
+## ParticipantStatusChangedEvent (JSONEventData)
++ `event_name`: `participant.status_changed`
++ `contact_id`: 56 (number) - Уникальный идентификатор пользователя
++ `conversation_id`: 56 (number) - Уникальный идентификатор беседы
++ `participation`: true (enum[boolean]) - Статус участия в конференции
+    + true (boolean) - Участвует
+    + false (boolean) - Не участвует
+    
+## EventAggregator (object)
++ `type`: `event.aggregator`
++ `data` (object)
+    + `events` (array[object])
+
+## SendFileRequest 
++ `conversation_id`: 2 (number) - ID беседы 
++ `text`: `some text` (string) - Текст, прикрепленный к файлу
++ `files`: `MTE=y\n` (array[string]) - Массив закодированных файлов (Base64)
++ `keys` (array[FileKeysRequest])
+
+## FileKeysRequest (object)
++ `key`: `aes` (string) - Ключ AES, закодированный публичный ключем
++ `device_id`: 44 (number) - ID устройства, которому передается файл
+
+## JSONRequest (object)
++ type: type (string)
++ data (JSONRequestData)
+
+
+## JSONRequestData
++ `request_id`: `request_id` (number, optional) - Уникальный идентификатор, позволяющий сопоставить ответ с запросом
+
+
+## JSONStreamResponse (JSONCommonResponse)
++ data (JSONRequestData)
